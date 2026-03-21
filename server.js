@@ -11,11 +11,7 @@ const VAPID_SUBJECT = "mailto:l5nhuy@outlook.com";
 const VAPID_PUBLIC_KEY = "BJ9fCmUNkHinIHGZgnuKA-h-Da2AppEL_YOw1IcVEWx_FgtD563m1pnAQVKjXx2uOZgQX8xgdpuqGHX3Dp_nugQ";
 const VAPID_PRIVATE_KEY = "TWIIZq7blAQtmwzSo1-4y5p1G5F57QzxX4SiO3tU_tg";
 
-webpush.setVapidDetails(
-  VAPID_SUBJECT,
-  VAPID_PUBLIC_KEY,
-  VAPID_PRIVATE_KEY
-);
+webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
 
 const SUBS_FILE = "./subscriptions.json";
 
@@ -25,175 +21,132 @@ function loadSubs() {
     const txt = fs.readFileSync(SUBS_FILE, "utf8");
     const arr = JSON.parse(txt);
     return Array.isArray(arr) ? arr : [];
-  } catch (e) {
-    return [];
-  }
+  } catch (e) { return []; }
 }
 
 function saveSubs(arr) {
   fs.writeFileSync(SUBS_FILE, JSON.stringify(arr, null, 2), "utf8");
 }
 
-function sameSub(a, b) {
-  return a && b && a.endpoint === b.endpoint;
-}
+// 清空旧的无userId订阅
+let subscriptions = loadSubs().filter(s => s.userId);
+saveSubs(subscriptions);
 
-let subscriptions = loadSubs();
-
-app.get("/", (req, res) => {
-  res.send("ok");
-});
+app.get("/", (req, res) => res.send("ok"));
 
 app.get("/vapid-public-key", (req, res) => {
   res.type("text/plain").send(VAPID_PUBLIC_KEY);
 });
 
-app.get("/subscribe", (req, res) => {
-  try {
-    const subText = req.query.sub;
-    if (!subText) {
-      return res.status(400).json({ error: "no sub" });
-    }
-
-    const sub = JSON.parse(subText);
-    if (!sub.endpoint) {
-      return res.status(400).json({ error: "bad subscription" });
-    }
-
-    const exists = subscriptions.some(s => sameSub(s, sub));
-    if (!exists) {
-      subscriptions.push(sub);
-      saveSubs(subscriptions);
-    }
-
-    res.json({ ok: true, saved: true, total: subscriptions.length });
-  } catch (e) {
-    res.status(400).json({ error: String(e) });
-  }
-});
-
+// 订阅（必须带userId）
 app.post("/subscribe", (req, res) => {
   try {
-    const sub = req.body;
-    if (!sub || !sub.endpoint) {
-      return res.status(400).json({ error: "bad subscription" });
-    }
+    const { sub, userId } = req.body;
+    if (!sub || !sub.endpoint) return res.status(400).json({ error: "bad subscription" });
+    if (!userId) return res.status(400).json({ error: "no userId" });
 
-    const exists = subscriptions.some(s => sameSub(s, sub));
-    if (!exists) {
-      subscriptions.push(sub);
-      saveSubs(subscriptions);
-    }
+    // 移除同一设备的旧订阅
+    subscriptions = subscriptions.filter(s => s.endpoint !== sub.endpoint);
+    subscriptions.push({ ...sub, userId });
+    saveSubs(subscriptions);
 
-    res.json({ ok: true, saved: true, total: subscriptions.length });
+    res.json({ ok: true, userId, total: subscriptions.length });
   } catch (e) {
     res.status(400).json({ error: String(e) });
   }
 });
 
-app.get("/last-sub", (req, res) => {
-  const last = subscriptions.length ? subscriptions[subscriptions.length - 1] : null;
-  res.json(last || { empty: true });
-});
-
+// 调试：查看订阅情况
 app.get("/subscriptions", (req, res) => {
+  const { userId } = req.query;
+  const list = userId
+    ? subscriptions.filter(s => s.userId === userId)
+    : subscriptions;
+
   res.json({
     ok: true,
     total: subscriptions.length,
-    endpoints: subscriptions.map(s => s.endpoint)
+    filtered: list.length,
+    userId: userId || "（未过滤）",
+    subs: list.map(s => ({
+      userId: s.userId,
+      endpoint: s.endpoint.slice(0, 60) + "...",
+      hasKeys: !!(s.keys && s.keys.p256dh && s.keys.auth)
+    }))
   });
 });
 
+// 测试推送（只推给指定userId）
 app.get("/send-test", async (req, res) => {
-  try {
-    if (!subscriptions.length) {
-      return res.status(400).json({ error: "no subscription saved" });
-    }
+  const { userId } = req.query;
+  if (!userId) return res.status(400).json({ error: "请带上 ?userId=你的ID" });
 
-    const payload = JSON.stringify({
-      title: "测试推送",
-      body: "这是一份手动推送～您已成功！",
-      url: "https://huios.pages.dev"
-    });
+  const targets = subscriptions.filter(s => s.userId === userId);
+  if (!targets.length) return res.status(400).json({ error: "该用户没有订阅" });
 
-    let success = 0;
-    const alive = [];
+  const payload = JSON.stringify({
+    title: "测试推送",
+    body: "这是一份手动推送，您已成功！",
+    url: "https://huios.pages.dev"
+  });
 
-    for (const sub of subscriptions) {
-      try {
+  let success = 0;
+  const alive = [];
+  for (const sub of subscriptions) {
+    try {
+      if (sub.userId === userId) {
         await webpush.sendNotification(sub, payload);
         success++;
-        alive.push(sub);
-      } catch (e) {
-        const code = e?.statusCode;
-        if (code !== 404 && code !== 410) {
-          alive.push(sub);
-        }
       }
+      alive.push(sub);
+    } catch (e) {
+      const code = e?.statusCode;
+      if (code !== 404 && code !== 410) alive.push(sub);
     }
-
-    subscriptions = alive;
-    saveSubs(subscriptions);
-
-    res.json({ ok: true, sent: success, total: subscriptions.length });
-  } catch (e) {
-    res.status(500).json({
-      ok: false,
-      error: String(e),
-      stack: e?.stack || ""
-    });
   }
+  subscriptions = alive;
+  saveSubs(subscriptions);
+
+  res.json({ ok: true, sent: success, userId });
 });
 
+// 正式推送（只推给指定userId）
 app.post("/send-push", async (req, res) => {
   try {
-    if (!subscriptions.length) {
-      return res.status(400).json({ error: "no subscription saved" });
-    }
+    const { title, body, url, userId } = req.body;
+    if (!userId) return res.status(400).json({ error: "no userId" });
 
-    const title = req.body?.title || "HuiOS";
-    const body = req.body?.body || "";
-    const url = req.body?.url || "https://huios.pages.dev";
+    const targets = subscriptions.filter(s => s.userId === userId);
+    if (!targets.length) return res.status(400).json({ error: "该用户没有订阅" });
 
-    const payload = JSON.stringify({ title, body, url });
+    const payload = JSON.stringify({
+      title: title || "HuiOS",
+      body: body || "",
+      url: url || "https://huios.pages.dev"
+    });
 
     let success = 0;
     const alive = [];
-
     for (const sub of subscriptions) {
       try {
-        await webpush.sendNotification(sub, payload);
-        success++;
+        if (sub.userId === userId) {
+          await webpush.sendNotification(sub, payload);
+          success++;
+        }
         alive.push(sub);
       } catch (e) {
         const code = e?.statusCode;
-        if (code !== 404 && code !== 410) {
-          alive.push(sub);
-        }
+        if (code !== 404 && code !== 410) alive.push(sub);
       }
     }
-
     subscriptions = alive;
     saveSubs(subscriptions);
 
-    res.json({
-      ok: true,
-      sent: success,
-      total: subscriptions.length,
-      title,
-      body,
-      url
-    });
+    res.json({ ok: true, sent: success, total: targets.length, userId });
   } catch (e) {
-    res.status(500).json({
-      ok: false,
-      error: String(e),
-      stack: e?.stack || ""
-    });
+    res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
 const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log("server running on port", port);
-});
+app.listen(port, () => console.log("server running on port", port));
