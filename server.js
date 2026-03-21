@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import webpush from "web-push";
+import fs from "fs";
 
 const app = express();
 app.use(cors());
@@ -16,7 +17,28 @@ webpush.setVapidDetails(
   VAPID_PRIVATE_KEY
 );
 
-let lastSub = null;
+const SUBS_FILE = "./subscriptions.json";
+
+function loadSubs() {
+  try {
+    if (!fs.existsSync(SUBS_FILE)) return [];
+    const txt = fs.readFileSync(SUBS_FILE, "utf8");
+    const arr = JSON.parse(txt);
+    return Array.isArray(arr) ? arr : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveSubs(arr) {
+  fs.writeFileSync(SUBS_FILE, JSON.stringify(arr, null, 2), "utf8");
+}
+
+function sameSub(a, b) {
+  return a && b && a.endpoint === b.endpoint;
+}
+
+let subscriptions = loadSubs();
 
 app.get("/", (req, res) => {
   res.send("ok");
@@ -34,9 +56,17 @@ app.get("/subscribe", (req, res) => {
     }
 
     const sub = JSON.parse(subText);
-    lastSub = sub;
+    if (!sub.endpoint) {
+      return res.status(400).json({ error: "bad subscription" });
+    }
 
-    res.json({ ok: true, saved: true });
+    const exists = subscriptions.some(s => sameSub(s, sub));
+    if (!exists) {
+      subscriptions.push(sub);
+      saveSubs(subscriptions);
+    }
+
+    res.json({ ok: true, saved: true, total: subscriptions.length });
   } catch (e) {
     res.status(400).json({ error: String(e) });
   }
@@ -49,20 +79,34 @@ app.post("/subscribe", (req, res) => {
       return res.status(400).json({ error: "bad subscription" });
     }
 
-    lastSub = sub;
-    res.json({ ok: true, saved: true });
+    const exists = subscriptions.some(s => sameSub(s, sub));
+    if (!exists) {
+      subscriptions.push(sub);
+      saveSubs(subscriptions);
+    }
+
+    res.json({ ok: true, saved: true, total: subscriptions.length });
   } catch (e) {
     res.status(400).json({ error: String(e) });
   }
 });
 
 app.get("/last-sub", (req, res) => {
-  res.json(lastSub || { empty: true });
+  const last = subscriptions.length ? subscriptions[subscriptions.length - 1] : null;
+  res.json(last || { empty: true });
+});
+
+app.get("/subscriptions", (req, res) => {
+  res.json({
+    ok: true,
+    total: subscriptions.length,
+    endpoints: subscriptions.map(s => s.endpoint)
+  });
 });
 
 app.get("/send-test", async (req, res) => {
   try {
-    if (!lastSub) {
+    if (!subscriptions.length) {
       return res.status(400).json({ error: "no subscription saved" });
     }
 
@@ -72,9 +116,74 @@ app.get("/send-test", async (req, res) => {
       url: "https://huios.pages.dev"
     });
 
-    await webpush.sendNotification(lastSub, payload);
+    let success = 0;
+    const alive = [];
 
-    res.json({ ok: true, sent: true });
+    for (const sub of subscriptions) {
+      try {
+        await webpush.sendNotification(sub, payload);
+        success++;
+        alive.push(sub);
+      } catch (e) {
+        const code = e?.statusCode;
+        if (code !== 404 && code !== 410) {
+          alive.push(sub);
+        }
+      }
+    }
+
+    subscriptions = alive;
+    saveSubs(subscriptions);
+
+    res.json({ ok: true, sent: success, total: subscriptions.length });
+  } catch (e) {
+    res.status(500).json({
+      ok: false,
+      error: String(e),
+      stack: e?.stack || ""
+    });
+  }
+});
+
+app.post("/send-push", async (req, res) => {
+  try {
+    if (!subscriptions.length) {
+      return res.status(400).json({ error: "no subscription saved" });
+    }
+
+    const title = req.body?.title || "HuiOS";
+    const body = req.body?.body || "";
+    const url = req.body?.url || "https://huios.pages.dev";
+
+    const payload = JSON.stringify({ title, body, url });
+
+    let success = 0;
+    const alive = [];
+
+    for (const sub of subscriptions) {
+      try {
+        await webpush.sendNotification(sub, payload);
+        success++;
+        alive.push(sub);
+      } catch (e) {
+        const code = e?.statusCode;
+        if (code !== 404 && code !== 410) {
+          alive.push(sub);
+        }
+      }
+    }
+
+    subscriptions = alive;
+    saveSubs(subscriptions);
+
+    res.json({
+      ok: true,
+      sent: success,
+      total: subscriptions.length,
+      title,
+      body,
+      url
+    });
   } catch (e) {
     res.status(500).json({
       ok: false,
