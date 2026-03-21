@@ -1,7 +1,7 @@
 import express from "express";
 import cors from "cors";
 import webpush from "web-push";
-import { readFileSync } from "fs";
+import fs from "fs";
 
 const app = express();
 app.use(cors());
@@ -10,25 +10,27 @@ app.use(express.json({ limit: "1mb" }));
 const VAPID_SUBJECT = "mailto:l5nhuy@outlook.com";
 const VAPID_PUBLIC_KEY = "BJ9fCmUNkHinIHGZgnuKA-h-Da2AppEL_YOw1IcVEWx_FgtD563m1pnAQVKjXx2uOZgQX8xgdpuqGHX3Dp_nugQ";
 const VAPID_PRIVATE_KEY = "TWIIZq7blAQtmwzSo1-4y5p1G5F57QzxX4SiO3tU_tg";
-const ADMIN_PASSWORD = "jam13397714566";
 
 webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
 
-// 内存存储
-const subscriptions = new Map(); // endpoint -> { userId, p256dh, auth }
-const users = new Map();         // userId -> { firstSeen, lastSeen, apiUrl }
-const warnings = [];             // { id, userId, message, createdAt, read }
-let warningIdCounter = 1;
+const SUBS_FILE = "./subscriptions.json";
 
-function upsertUser(userId, apiUrl) {
-  if (users.has(userId)) {
-    const u = users.get(userId);
-    u.lastSeen = new Date();
-    if (apiUrl) u.apiUrl = apiUrl;
-  } else {
-    users.set(userId, { firstSeen: new Date(), lastSeen: new Date(), apiUrl: apiUrl || null });
-  }
+function loadSubs() {
+  try {
+    if (!fs.existsSync(SUBS_FILE)) return [];
+    const txt = fs.readFileSync(SUBS_FILE, "utf8");
+    const arr = JSON.parse(txt);
+    return Array.isArray(arr) ? arr : [];
+  } catch (e) { return []; }
 }
+
+function saveSubs(arr) {
+  fs.writeFileSync(SUBS_FILE, JSON.stringify(arr, null, 2), "utf8");
+}
+
+// 清空旧的无userId订阅
+let subscriptions = loadSubs().filter(s => s.userId);
+saveSubs(subscriptions);
 
 app.get("/", (req, res) => res.send("ok"));
 
@@ -36,139 +38,114 @@ app.get("/vapid-public-key", (req, res) => {
   res.type("text/plain").send(VAPID_PUBLIC_KEY);
 });
 
-// 订阅
+// 订阅（必须带userId）
 app.post("/subscribe", (req, res) => {
   try {
-    const { sub, userId, apiUrl } = req.body;
+    const { sub, userId } = req.body;
     if (!sub || !sub.endpoint) return res.status(400).json({ error: "bad subscription" });
     if (!userId) return res.status(400).json({ error: "no userId" });
 
-    subscriptions.set(sub.endpoint, {
-      userId,
-      p256dh: sub.keys?.p256dh,
-      auth: sub.keys?.auth
-    });
+    // 移除同一设备的旧订阅
+    subscriptions = subscriptions.filter(s => s.endpoint !== sub.endpoint);
+    subscriptions.push({ ...sub, userId });
+    saveSubs(subscriptions);
 
-    upsertUser(userId, apiUrl);
-
-    res.json({ ok: true, userId, total: subscriptions.size });
+    res.json({ ok: true, userId, total: subscriptions.length });
   } catch (e) {
     res.status(400).json({ error: String(e) });
   }
 });
 
-// 查询订阅（调试用）
+// 调试：查看订阅情况
 app.get("/subscriptions", (req, res) => {
   const { userId } = req.query;
-  const all = [...subscriptions.entries()].map(([endpoint, s]) => ({ endpoint, ...s }));
-  const filtered = userId ? all.filter(s => s.userId === userId) : all;
+  const list = userId
+    ? subscriptions.filter(s => s.userId === userId)
+    : subscriptions;
+
   res.json({
     ok: true,
-    total: subscriptions.size,
-    filtered: filtered.length,
-    subs: filtered.map(s => ({
+    total: subscriptions.length,
+    filtered: list.length,
+    userId: userId || "（未过滤）",
+    subs: list.map(s => ({
       userId: s.userId,
       endpoint: s.endpoint.slice(0, 60) + "...",
-      hasKeys: !!(s.p256dh && s.auth)
+      hasKeys: !!(s.keys && s.keys.p256dh && s.keys.auth)
     }))
   });
 });
 
-// 测试推送
+// 测试推送（只推给指定userId）
 app.get("/send-test", async (req, res) => {
   const { userId } = req.query;
   if (!userId) return res.status(400).json({ error: "请带上 ?userId=你的ID" });
 
-  const userSubs = [...subscriptions.entries()].filter(([, s]) => s.userId === userId);
-  if (!userSubs.length) return res.status(400).json({ error: "该用户没有订阅" });
+  const targets = subscriptions.filter(s => s.userId === userId);
+  if (!targets.length) return res.status(400).json({ error: "该用户没有订阅" });
 
-  const payload = JSON.stringify({ title: "测试推送", body: "推送成功！", url: "https://huios.pages.dev" });
+  const payload = JSON.stringify({
+    title: "测试推送",
+    body: "这是一份手动推送，您已成功！",
+    url: "https://huios.pages.dev"
+  });
+
   let success = 0;
-  for (const [endpoint, s] of userSubs) {
+  const alive = [];
+  for (const sub of subscriptions) {
     try {
-      await webpush.sendNotification({ endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payload);
-      success++;
-    } catch (e) {
-      if (e?.statusCode === 404 || e?.statusCode === 410) {
-        subscriptions.delete(endpoint);
+      if (sub.userId === userId) {
+        await webpush.sendNotification(sub, payload);
+        success++;
       }
+      alive.push(sub);
+    } catch (e) {
+      const code = e?.statusCode;
+      if (code !== 404 && code !== 410) alive.push(sub);
     }
   }
+  subscriptions = alive;
+  saveSubs(subscriptions);
+
   res.json({ ok: true, sent: success, userId });
 });
 
-// 正式推送
+// 正式推送（只推给指定userId）
 app.post("/send-push", async (req, res) => {
   try {
     const { title, body, url, userId } = req.body;
     if (!userId) return res.status(400).json({ error: "no userId" });
 
-    const userSubs = [...subscriptions.entries()].filter(([, s]) => s.userId === userId);
-    if (!userSubs.length) return res.status(400).json({ error: "该用户没有订阅" });
+    const targets = subscriptions.filter(s => s.userId === userId);
+    if (!targets.length) return res.status(400).json({ error: "该用户没有订阅" });
 
-    const payload = JSON.stringify({ title: title || "HuiOS", body: body || "", url: url || "https://huios.pages.dev" });
+    const payload = JSON.stringify({
+      title: title || "HuiOS",
+      body: body || "",
+      url: url || "https://huios.pages.dev"
+    });
+
     let success = 0;
-    for (const [endpoint, s] of userSubs) {
+    const alive = [];
+    for (const sub of subscriptions) {
       try {
-        await webpush.sendNotification({ endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payload);
-        success++;
-      } catch (e) {
-        if (e?.statusCode === 404 || e?.statusCode === 410) {
-          subscriptions.delete(endpoint);
+        if (sub.userId === userId) {
+          await webpush.sendNotification(sub, payload);
+          success++;
         }
+        alive.push(sub);
+      } catch (e) {
+        const code = e?.statusCode;
+        if (code !== 404 && code !== 410) alive.push(sub);
       }
     }
-    res.json({ ok: true, sent: success, userId });
+    subscriptions = alive;
+    saveSubs(subscriptions);
+
+    res.json({ ok: true, sent: success, total: targets.length, userId });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
-});
-
-// ===== ADMIN =====
-
-app.post("/admin/login", (req, res) => {
-  const { password } = req.body;
-  if (password === ADMIN_PASSWORD) return res.json({ ok: true });
-  res.status(401).json({ ok: false });
-});
-
-app.get("/admin/users", (req, res) => {
-  const { password } = req.query;
-  if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: "unauthorized" });
-  const result = [...users.entries()].map(([userId, u]) => ({
-    user_id: userId,
-    first_seen: u.firstSeen,
-    last_seen: u.lastSeen,
-    api_url: u.apiUrl
-  })).sort((a, b) => new Date(b.last_seen) - new Date(a.last_seen));
-  res.json({ ok: true, users: result });
-});
-
-app.post("/admin/warn", (req, res) => {
-  const { password, userId, message } = req.body;
-  if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: "unauthorized" });
-  warnings.push({ id: warningIdCounter++, userId, message, createdAt: new Date(), read: false });
-  res.json({ ok: true });
-});
-
-app.get("/warnings", (req, res) => {
-  const { userId } = req.query;
-  if (!userId) return res.status(400).json({ error: "no userId" });
-  const unread = warnings.filter(w => w.userId === userId && !w.read);
-  unread.forEach(w => { w.read = true; });
-  res.json({ ok: true, warnings: unread });
-});
-
-app.post("/report", (req, res) => {
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ error: "no userId" });
-  upsertUser(userId, null);
-  res.json({ ok: true });
-});
-
-app.get("/admin", (req, res) => {
-  res.setHeader("Content-Type", "text/html");
-  res.send(readFileSync("./admin.html", "utf8"));
 });
 
 const port = process.env.PORT || 3000;
