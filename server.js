@@ -16,7 +16,11 @@ const DB_URL = "postgresql://postgres:jam13397714566@db.svomalcpqiigxklmakrj.sup
 
 webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
 
-const pool = new Pool({ connectionString: DB_URL, ssl: { rejectUnauthorized: false } });
+const pool = new Pool({ 
+  connectionString: DB_URL, 
+  ssl: { rejectUnauthorized: false },
+  family: 4
+});
 
 // 初始化数据库表
 async function initDB() {
