@@ -112,7 +112,7 @@ app.get("/send-test", async (req, res) => {
 
     const payload = JSON.stringify({
       title: "测试推送",
-      body: "你已经成功收到来自 HuiOS 的推送！",
+      body: "这是一份手动推送～您已成功！",
       url: "https://huios.pages.dev"
     });
 
