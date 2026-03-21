@@ -159,6 +159,13 @@ app.get("/warnings", (req, res) => {
   res.json({ ok: true, warnings: unread });
 });
 
+app.post("/report", (req, res) => {
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ error: "no userId" });
+  upsertUser(userId, null);
+  res.json({ ok: true });
+});
+
 app.get("/admin", (req, res) => {
   res.setHeader("Content-Type", "text/html");
   res.send(readFileSync("./admin.html", "utf8"));
