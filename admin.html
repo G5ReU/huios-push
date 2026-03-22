@@ -1,73 +1,111 @@
 <!DOCTYPE html>
 <html lang="zh">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>HuiOS Admin</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #f5f5f7; min-height: 100vh; }
+
   #loginPage { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
   .login-box { background: white; border-radius: 18px; padding: 40px; width: min(90vw, 360px); box-shadow: 0 8px 40px rgba(0,0,0,0.12); }
   .login-box h1 { font-size: 22px; font-weight: 700; margin-bottom: 24px; text-align: center; }
+
   input { width: 100%; padding: 12px 16px; border: 1px solid #e0e0e0; border-radius: 10px; font-size: 15px; margin-bottom: 12px; outline: none; }
   button { width: 100%; padding: 13px; border: none; border-radius: 10px; background: #9D8BB8; color: white; font-size: 15px; font-weight: 600; cursor: pointer; }
-  #adminPage { display: none; padding: 24px; max-width: 800px; margin: 0 auto; }
+
+  #adminPage { display: none; padding: 24px; max-width: 900px; margin: 0 auto; }
   h2 { font-size: 20px; font-weight: 700; margin-bottom: 16px; margin-top: 24px; }
+
   .user-card { background: white; border-radius: 14px; padding: 16px 20px; margin-bottom: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); cursor: pointer; }
   .user-card:hover { background: #f9f9f9; }
   .user-id { font-weight: 600; font-size: 14px; color: #333; margin-bottom: 4px; word-break: break-all; }
-  .user-meta { font-size: 12px; color: #999; }
+  .user-meta { font-size: 12px; color: #777; }
+
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; margin-left: 6px; }
+  .badge-ban { background: #ffe9e8; color: #d93025; }
+  .badge-ok { background: #e9f7ef; color: #137333; }
+
   .detail-box { background: white; border-radius: 14px; padding: 20px; margin-top: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); display: none; }
   .detail-box h3 { font-size: 16px; font-weight: 700; margin-bottom: 12px; }
   .detail-row { font-size: 13px; color: #555; margin-bottom: 8px; word-break: break-all; }
   .detail-row span { font-weight: 600; color: #333; }
+
+  .msgs {
+    background: #f7f7f9;
+    border: 1px solid #ececf1;
+    border-radius: 10px;
+    padding: 10px;
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    min-height: 70px;
+    color: #333;
+    margin-top: 8px;
+  }
+
   textarea { width: 100%; padding: 12px; border: 1px solid #e0e0e0; border-radius: 10px; font-size: 14px; height: 80px; resize: none; margin-top: 12px; outline: none; font-family: inherit; }
   .warn-btn { background: #ff3b30; margin-top: 10px; }
   .back-btn { background: none; color: #9D8BB8; font-size: 14px; padding: 8px 0; width: auto; margin-bottom: 8px; }
   .err { color: red; font-size: 13px; margin-top: 8px; }
+  .muted { color: #999; font-size: 13px; }
 </style>
 </head>
 <body>
-
-<div id="loginPage">
-  <div class="login-box">
-    <h1>HuiOS Admin</h1>
-    <input type="password" id="pwInput" placeholder="密码" />
-    <button onclick="doLogin()">登录</button>
-    <div class="err" id="loginErr"></div>
+  <div id="loginPage">
+    <div class="login-box">
+      <h1>HuiOS Admin</h1>
+      <input type="password" id="pwInput" placeholder="密码" />
+      <button onclick="doLogin()">登录</button>
+      <div class="err" id="loginErr"></div>
+    </div>
   </div>
-</div>
 
-<div id="adminPage">
-  <h2>用户总览</h2>
-  <div id="userList">加载中...</div>
-  <div class="detail-box" id="detailBox">
-    <button class="back-btn" onclick="closeDetail()">← 返回</button>
-    <h3 id="detailTitle">用户详情</h3>
-    <div class="detail-row">设备ID：<span id="dUserId"></span></div>
-    <div class="detail-row">首次访问：<span id="dFirstSeen"></span></div>
-    <div class="detail-row">最后活跃：<span id="dLastSeen"></span></div>
-    <div class="detail-row">API地址：<span id="dApiUrl"></span></div>
-    <textarea id="warnMsg" placeholder="输入警告内容..."></textarea>
-    <button class="warn-btn" onclick="sendWarn()">发送警告</button>
-    <div class="err" id="warnErr"></div>
+  <div id="adminPage">
+    <h2>用户总览</h2>
+    <div id="userList">加载中...</div>
+
+    <div class="detail-box" id="detailBox">
+      <button class="back-btn" onclick="closeDetail()">← 返回</button>
+      <h3>用户详情</h3>
+      <div class="detail-row">设备ID：<span id="dUserId"></span></div>
+      <div class="detail-row">首次访问：<span id="dFirstSeen"></span></div>
+      <div class="detail-row">最后活跃：<span id="dLastSeen"></span></div>
+      <div class="detail-row">IP地址：<span id="dIp"></span></div>
+      <div class="detail-row">API地址：<span id="dApiUrl"></span></div>
+      <div class="detail-row">封禁状态：<span id="dBan"></span></div>
+      <div class="detail-row">最近10条消息：</div>
+      <div class="msgs" id="dMsgs">暂无</div>
+
+      <textarea id="warnMsg" placeholder="输入警告内容..."></textarea>
+      <button class="warn-btn" onclick="sendWarn()">发送警告</button>
+      <div class="err" id="warnErr"></div>
+    </div>
   </div>
-</div>
 
 <script>
 const API = location.origin;
 let pw = "";
 let currentUserId = "";
+let usersCache = [];
+
+function fmt(ts) {
+  if (!ts) return "—";
+  const d = new Date(ts);
+  return isNaN(d.getTime()) ? "—" : d.toLocaleString("zh-CN");
+}
 
 async function doLogin() {
-  pw = document.getElementById("pwInput").value;
+  pw = document.getElementById("pwInput").value.trim();
   const res = await fetch(API + "/admin/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ password: pw })
   });
+
   if (res.ok) {
+    document.getElementById("loginErr").textContent = "";
     document.getElementById("loginPage").style.display = "none";
     document.getElementById("adminPage").style.display = "block";
     loadUsers();
@@ -77,27 +115,55 @@ async function doLogin() {
 }
 
 async function loadUsers() {
-  const res = await fetch(`${API}/admin/users?password=${encodeURIComponent(pw)}`);
-  const data = await res.json();
   const list = document.getElementById("userList");
-  if (!data.users || !data.users.length) {
-    list.innerHTML = "<div style='color:#999;font-size:14px;'>暂无用户</div>";
-    return;
+  try {
+    const res = await fetch(`${API}/admin/users?password=${encodeURIComponent(pw)}`);
+    const data = await res.json();
+
+    if (!res.ok || !data.ok) {
+      list.innerHTML = `<div class="muted">加载失败：${data.error || "未知错误"}</div>`;
+      return;
+    }
+
+    usersCache = data.users || [];
+    if (!usersCache.length) {
+      list.innerHTML = "<div class='muted'>暂无用户</div>";
+      return;
+    }
+
+    list.innerHTML = usersCache.map((u, i) => `
+      <div class="user-card" onclick="showDetailByIndex(${i})">
+        <div class="user-id">
+          ${u.user_id}
+          ${u.banned ? '<span class="badge badge-ban">已封禁</span>' : '<span class="badge badge-ok">正常</span>'}
+        </div>
+        <div class="user-meta">IP：${u.ip_masked || "未记录"} ｜ 最后活跃：${fmt(u.last_seen)}</div>
+      </div>
+    `).join("");
+  } catch (e) {
+    list.innerHTML = `<div class="muted">请求异常：${String(e)}</div>`;
   }
-  list.innerHTML = data.users.map(u => `
-    <div class="user-card" onclick="showDetail(${JSON.stringify(u).replace(/"/g, '&quot;')})">
-      <div class="user-id">${u.user_id}</div>
-      <div class="user-meta">最后活跃：${new Date(u.last_seen).toLocaleString("zh-CN")}</div>
-    </div>
-  `).join("");
 }
 
-function showDetail(u) {
+function showDetailByIndex(i) {
+  const u = usersCache[i];
+  if (!u) return;
   currentUserId = u.user_id;
-  document.getElementById("dUserId").textContent = u.user_id;
-  document.getElementById("dFirstSeen").textContent = new Date(u.first_seen).toLocaleString("zh-CN");
-  document.getElementById("dLastSeen").textContent = new Date(u.last_seen).toLocaleString("zh-CN");
+
+  document.getElementById("dUserId").textContent = u.user_id || "—";
+  document.getElementById("dFirstSeen").textContent = fmt(u.first_seen);
+  document.getElementById("dLastSeen").textContent = fmt(u.last_seen);
+  document.getElementById("dIp").textContent = u.ip_masked || "未记录";
   document.getElementById("dApiUrl").textContent = u.api_url || "未记录";
+  document.getElementById("dBan").textContent = u.banned
+    ? `已封禁${u.ban_reason ? "（" + u.ban_reason + "）" : ""}${u.ban_until ? "，到期：" + fmt(u.ban_until) : "（永久）"}`
+    : "正常";
+
+  const msgs = Array.isArray(u.last10_ai_msgs) ? u.last10_ai_msgs : [];
+  document.getElementById("dMsgs").textContent = msgs.length
+    ? msgs.map(m => `[${fmt(m.t)}] ${m.role || "user"}: ${m.text || ""}`).join("\n")
+    : "暂无";
+
   document.getElementById("warnMsg").value = "";
   document.getElementById("warnErr").textContent = "";
   document.getElementById("detailBox").style.display = "block";
@@ -110,12 +176,17 @@ function closeDetail() {
 
 async function sendWarn() {
   const message = document.getElementById("warnMsg").value.trim();
-  if (!message) { document.getElementById("warnErr").textContent = "请输入内容"; return; }
+  if (!message) {
+    document.getElementById("warnErr").textContent = "请输入内容";
+    return;
+  }
+
   const res = await fetch(API + "/admin/warn", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ password: pw, userId: currentUserId, message })
   });
+
   if (res.ok) {
     document.getElementById("warnMsg").value = "";
     document.getElementById("warnErr").textContent = "已发送";
