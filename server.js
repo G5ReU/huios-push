@@ -105,6 +105,8 @@ app.get("/client/status", (req, res) => {
   const userId = String(req.query.userId || "");
   if (!userId) return fail(res, 400, "no userId");
 
+  const apiUrl = String(req.query.apiUrl || req.body?.apiUrl || "").trim();
+
   if (!users[userId]) {
     users[userId] = {
       userId,
@@ -112,16 +114,15 @@ app.get("/client/status", (req, res) => {
       lastSeen: now(),
       ipMasked: maskIp(getRawIp(req)),
       ipHash: ipHash(getRawIp(req)),
-      apiUrl: "",
+      apiUrl: apiUrl || "",
       ban: { active: false, reason: "", until: 0 },
       last10AiMsgs: []
     };
-    saveJson(USERS_FILE, users);
   } else {
     users[userId].lastSeen = now();
     users[userId].ipMasked = maskIp(getRawIp(req));
     users[userId].ipHash = ipHash(getRawIp(req));
-    saveJson(USERS_FILE, users);
+    if (apiUrl) users[userId].apiUrl = apiUrl;
   }
 
   const u = users[userId];
@@ -159,6 +160,41 @@ app.post("/client/appeal", (req, res) => {
 
   saveJson(APPEALS_FILE, appeals);
   return ok(res, { id });
+});
+app.post("/client/ai-log", (req, res) => {
+  const { userId, role, text } = req.body || {};
+  if (!userId) return fail(res, 400, "no userId");
+  const msg = String(text || "").trim();
+  if (!msg) return fail(res, 400, "no text");
+
+  const uid = String(userId);
+  if (!users[uid]) {
+    users[uid] = {
+      userId: uid,
+      firstSeen: now(),
+      lastSeen: now(),
+      ipMasked: maskIp(getRawIp(req)),
+      ipHash: ipHash(getRawIp(req)),
+      apiUrl: "",
+      ban: { active: false, reason: "", until: 0 },
+      last10AiMsgs: []
+    };
+  }
+
+  users[uid].lastSeen = now();
+  users[uid].ipMasked = maskIp(getRawIp(req));
+  users[uid].ipHash = ipHash(getRawIp(req));
+
+  users[uid].last10AiMsgs = users[uid].last10AiMsgs || [];
+  users[uid].last10AiMsgs.push({
+    t: now(),
+    role: role === "assistant" ? "assistant" : "user",
+    text: msg.slice(0, 500)
+  });
+  users[uid].last10AiMsgs = users[uid].last10AiMsgs.slice(-10);
+
+  saveJson(USERS_FILE, users);
+  ok(res);
 });
 
 // ===== 订阅 =====
