@@ -322,16 +322,24 @@ app.post("/send-push", async (req, res) => {
 app.post("/bg/sync", (req, res) => {
   const { userId, chars, chats, settings, api, lastInteract, lastBgTime } = req.body || {};
   if (!userId || !chars || !chats) return fail(res, 400, "bad params");
+
+  const old = bgData[userId] || {};
+
   bgData[userId] = {
+    ...old,
     chars,
     chats,
-    settings: settings || {},
-    api: api || {},
-    lastInteract: lastInteract || {},
-    lastBgTime: lastBgTime || (bgData[userId]?.lastBgTime || {}),
-    newMsgs: bgData[userId]?.newMsgs || [],
-    newMoments: bgData[userId]?.newMoments || []
+    settings: settings || old.settings || {},
+    api: api || old.api || {},
+    lastInteract: lastInteract || old.lastInteract || {},
+    lastBgTime: {
+      ...(old.lastBgTime || {}),
+      ...(lastBgTime || {})
+    },
+    newMsgs: old.newMsgs || [],
+    newMoments: old.newMoments || []
   };
+
   saveBgData();
   ok(res);
 });
@@ -520,7 +528,16 @@ app.post("/admin/appeals/handle", (req, res) => {
 // ===== 后台活动生成 =====
 async function callBgAI(u, char, lastGapText, historyText, timePeriod) {
   const api = (u.api && u.api.key) ? u.api : { url: "https://api.openai.com", key: "", model: "" };
-  if (!api.key || !api.model) return "";
+
+  if (!api.key || !api.model) {
+    console.warn("[bgAI] missing api config", {
+      hasUrl: !!api.url,
+      hasKey: !!api.key,
+      hasModel: !!api.model
+    });
+    return "";
+  }
+
   const sysPrompt = [
     `你是"${char.realName}"。`,
     char.persona ? `【角色设定】\n${char.persona}` : "",
@@ -532,7 +549,10 @@ async function callBgAI(u, char, lastGapText, historyText, timePeriod) {
 
   const resp = await fetch(api.url.replace(/\/+$/, "") + "/v1/chat/completions", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + api.key },
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer " + api.key
+    },
     body: JSON.stringify({
       model: api.model,
       messages: [
@@ -542,6 +562,13 @@ async function callBgAI(u, char, lastGapText, historyText, timePeriod) {
       temperature: 1
     })
   });
+
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => "");
+    console.warn("[bgAI] bad response", resp.status, txt.slice(0, 500));
+    return "";
+  }
+
   const j = await resp.json();
   return j?.choices?.[0]?.message?.content || "";
 }
@@ -564,65 +591,144 @@ function parseBgText(text) {
 // 每分钟巡检
 async function runBgCron() {
   const now = Date.now();
+  console.log("[bgCron] tick", new Date(now).toISOString(), "users=", Object.keys(bgData).length);
+
   for (const [userId, u] of Object.entries(bgData)) {
     const intervalMs = Math.max((u.settings?.bgInterval || 120) * 1000, 5000);
-    for (const char of u.chars || []) {
-      if (char.bgEnabled === false) continue;
-      const lastChat = (u.lastInteract && u.lastInteract[char.id]) ||
-                       ((u.chats[char.id] || []).slice(-1)[0]?.time) || 0;
-      const lastBg  = (u.lastBgTime && u.lastBgTime[char.id]) || 0;
-      if (!lastChat) continue;
-      if ((now - lastChat < intervalMs) || (now - lastBg < intervalMs)) continue;
 
-      // 构造历史文本/时间段
-      const historyArr = (u.chats[char.id] || []).slice(-20).map(m => {
+    for (const char of u.chars || []) {
+      if (char.bgEnabled === false) {
+        console.log("[bgCron] skip bg disabled", { userId, charId: char.id });
+        continue;
+      }
+
+const lastInteractTime = u.lastInteract?.[char.id];
+const lastChatMsgTime = (u.chats?.[char.id] || []).slice(-1)[0]?.time;
+const lastChat = (typeof lastInteractTime === "number" ? lastInteractTime : 0)
+              || (typeof lastChatMsgTime === "number" ? lastChatMsgTime : 0)
+              || (u.chats?.[char.id]?.length ? Date.now() - 60 * 60 * 1000 : 0);
+const lastBg = (u.lastBgTime && u.lastBgTime[char.id]) || 0;
+
+console.log("[bgCron] lastChat debug", {
+  userId,
+  charId: char.id,
+  lastInteractTime,
+  lastChatMsgTime,
+  lastChat,
+  lastBg,
+  intervalMs,
+  sinceChat: Date.now() - lastChat,
+  sinceBg: Date.now() - lastBg
+});
+
+      console.log("[bgCron] check", {
+        userId,
+        charId: char.id,
+        intervalMs,
+        lastChat,
+        lastBg
+      });
+
+      if (!lastChat) {
+        console.log("[bgCron] skip no lastChat", { userId, charId: char.id });
+        continue;
+      }
+
+      if ((now - lastChat < intervalMs) || (now - lastBg < intervalMs)) {
+        console.log("[bgCron] skip interval not reached", {
+          userId,
+          charId: char.id,
+          sinceChat: now - lastChat,
+          sinceBg: now - lastBg,
+          intervalMs
+        });
+        continue;
+      }
+
+      const historyArr = (u.chats?.[char.id] || []).slice(-20).map(m => {
         if (!m.content) return null;
         const name = m.role === "user" ? (u.settings?.userName || "用户") : char.realName;
         return `${name}：${m.content}`;
       }).filter(Boolean);
-      const historyText = historyArr.join("\n");
-      const hour = new Date(now + (u.settings?.tz || 8) * 3600000 - new Date().getTimezoneOffset()*60000).getHours();
-      const timePeriod = hour < 6 ? '凌晨' : hour < 9 ? '早上' : hour < 12 ? '上午' : hour < 14 ? '中午' : hour < 18 ? '下午' : hour < 22 ? '晚上' : '深夜';
-      const gapText = `${Math.floor((now - lastChat)/60000)}分钟`;
 
-      // 调 AI
+      const historyText = historyArr.join("\n");
+      const hour = new Date(
+        now + (u.settings?.tz || 8) * 3600000 - new Date().getTimezoneOffset() * 60000
+      ).getHours();
+      const timePeriod =
+        hour < 6 ? "凌晨" :
+        hour < 9 ? "早上" :
+        hour < 12 ? "上午" :
+        hour < 14 ? "中午" :
+        hour < 18 ? "下午" :
+        hour < 22 ? "晚上" : "深夜";
+      const gapText = `${Math.floor((now - lastChat) / 60000)}分钟`;
+
       let text = "";
-      try { text = await callBgAI(u, char, gapText, historyText, timePeriod); } catch (e) { console.warn("bg ai error", e); }
+      try {
+        text = await callBgAI(u, char, gapText, historyText, timePeriod);
+        console.log("[bgCron] ai text", { userId, charId: char.id, text });
+      } catch (e) {
+        console.warn("[bgCron] bg ai error", e);
+      }
+
       const acts = parseBgText(text);
 
-      // 写入暂存 + 推送
       if (acts.dm && acts.dm.length) {
         u.newMsgs = u.newMsgs || [];
-        acts.dm.slice(0, 3).forEach(dm => {
-          u.newMsgs.push({ charId: char.id, role: "ai", content: dm, time: Date.now() });
-          pushToUser(String(userId), {
+
+        for (const dm of acts.dm.slice(0, 3)) {
+          u.newMsgs.push({
+            charId: char.id,
+            role: "ai",
+            content: dm,
+            time: Date.now()
+          });
+
+          const pushRes = await pushToUser(String(userId), {
             title: char.displayName || char.realName || "新消息",
             body: dm.slice(0, 60),
             url: "https://huios.pages.dev",
             tag: "chat-" + char.id,
             icon: char.avatar || ""
           });
-        });
+
+          console.log("[bgCron] dm pushed", { userId, charId: char.id, pushRes });
+        }
       }
+
       if (acts.moment && acts.moment.length) {
         u.newMoments = u.newMoments || [];
         const m = acts.moment[0];
-        u.newMoments.push({ charId: char.id, content: m, time: Date.now() });
-        pushToUser(String(userId), {
-            title: (char.displayName || char.realName || "角色") + " 发了新动态",
-            body: m.slice(0, 60),
-            url: "https://huios.pages.dev",
-            tag: "moment-" + char.id,
-            icon: char.avatar || ""
+
+        u.newMoments.push({
+          charId: char.id,
+          content: m,
+          time: Date.now()
         });
+
+        const pushRes = await pushToUser(String(userId), {
+          title: (char.displayName || char.realName || "角色") + " 发了新动态",
+          body: m.slice(0, 60),
+          url: "https://huios.pages.dev",
+          tag: "moment-" + char.id,
+          icon: char.avatar || ""
+        });
+
+        console.log("[bgCron] moment pushed", { userId, charId: char.id, pushRes });
       }
+
       u.lastBgTime = u.lastBgTime || {};
       u.lastBgTime[char.id] = now;
     }
   }
+
   saveBgData();
 }
-setInterval(runBgCron, 60 * 1000);
+runBgCron().catch(e => console.warn("bg cron first run error:", e));
+setInterval(() => {
+  runBgCron().catch(e => console.warn("bg cron error:", e));
+}, 15 * 1000);
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log("server running on port", port));
