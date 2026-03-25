@@ -30,6 +30,10 @@ const APPEALS_FILE = "./appeals.json";
 const AUDIT_FILE = "./audit.json";
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "123456";
+// ===== 后台活动存储 =====
+const BG_DATA_FILE = "./bgdata.json";
+let bgData = loadJson(BG_DATA_FILE, {}); // { userId: { chars, chats, settings, api, lastInteract, lastBgTime, newMsgs, newMoments } }
+function saveBgData() { saveJson(BG_DATA_FILE, bgData); }
 
 // ===== 工具 =====
 function loadJson(file, fallback) {
@@ -314,6 +318,35 @@ app.post("/send-push", async (req, res) => {
   }
 });
 
+// 前端同步基础数据
+app.post("/bg/sync", (req, res) => {
+  const { userId, chars, chats, settings, api, lastInteract, lastBgTime } = req.body || {};
+  if (!userId || !chars || !chats) return fail(res, 400, "bad params");
+  bgData[userId] = {
+    chars,
+    chats,
+    settings: settings || {},
+    api: api || {},
+    lastInteract: lastInteract || {},
+    lastBgTime: lastBgTime || (bgData[userId]?.lastBgTime || {}),
+    newMsgs: bgData[userId]?.newMsgs || [],
+    newMoments: bgData[userId]?.newMoments || []
+  };
+  saveBgData();
+  ok(res);
+});
+
+// 前端拉取服务器生成的新内容
+app.get("/bg/pull", (req, res) => {
+  const userId = String(req.query.userId || "");
+  if (!userId || !bgData[userId]) return ok(res, { newMsgs: [], newMoments: [] });
+  const u = bgData[userId];
+  ok(res, { newMsgs: u.newMsgs || [], newMoments: u.newMoments || [] });
+  u.newMsgs = [];
+  u.newMoments = [];
+  saveBgData();
+});
+
 // ===== Admin =====
 app.post("/admin/login", (req, res) => {
   if (!adminAuth(req)) return fail(res, 401, "密码错误");
@@ -483,6 +516,113 @@ app.post("/admin/appeals/handle", (req, res) => {
 
   ok(res, { appealId: a.id, status: a.status });
 });
+
+// ===== 后台活动生成 =====
+async function callBgAI(u, char, lastGapText, historyText, timePeriod) {
+  const api = (u.api && u.api.key) ? u.api : { url: "https://api.openai.com", key: "", model: "" };
+  if (!api.key || !api.model) return "";
+  const sysPrompt = [
+    `你是"${char.realName}"。`,
+    char.persona ? `【角色设定】\n${char.persona}` : "",
+    `【当前时间】${timePeriod}`,
+    `【距上次和用户聊天】${lastGapText}`,
+    historyText ? `【最近的聊天记录】\n${historyText}` : "",
+    "用户不在线，可以选择：\n- 发私信 <DM>内容</DM>（最多1-3条）\n- 发朋友圈 <MOMENT>内容</MOMENT>\n- 什么都不做 <IDLE>\n要符合性格，该安静时就<IDLE>。"
+  ].join("\n\n");
+
+  const resp = await fetch(api.url.replace(/\/+$/, "") + "/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + api.key },
+    body: JSON.stringify({
+      model: api.model,
+      messages: [
+        { role: "system", content: sysPrompt },
+        { role: "user", content: `现在是${timePeriod}，距上次聊天${lastGapText}，你想做什么？` }
+      ],
+      temperature: 1
+    })
+  });
+  const j = await resp.json();
+  return j?.choices?.[0]?.message?.content || "";
+}
+
+// 简化版解析 <DM>/<MOMENT>
+function parseBgText(text) {
+  const actions = { dm: [], moment: [] };
+  if (!text) return actions;
+  (text.match(/<DM>([\s\S]*?)<\/DM>/g) || []).forEach(dm => {
+    const c = dm.replace(/<\/?DM>/g, "").trim();
+    if (c) actions.dm.push(c);
+  });
+  (text.match(/<MOMENT>([\s\S]*?)<\/MOMENT>/g) || []).forEach(m => {
+    const c = m.replace(/<\/?MOMENT>/g, "").trim();
+    if (c) actions.moment.push(c);
+  });
+  return actions;
+}
+
+// 每分钟巡检
+async function runBgCron() {
+  const now = Date.now();
+  for (const [userId, u] of Object.entries(bgData)) {
+    const intervalMs = Math.max((u.settings?.bgInterval || 120) * 1000, 5000);
+    for (const char of u.chars || []) {
+      if (char.bgEnabled === false) continue;
+      const lastChat = (u.lastInteract && u.lastInteract[char.id]) ||
+                       ((u.chats[char.id] || []).slice(-1)[0]?.time) || 0;
+      const lastBg  = (u.lastBgTime && u.lastBgTime[char.id]) || 0;
+      if (!lastChat) continue;
+      if ((now - lastChat < intervalMs) || (now - lastBg < intervalMs)) continue;
+
+      // 构造历史文本/时间段
+      const historyArr = (u.chats[char.id] || []).slice(-20).map(m => {
+        if (!m.content) return null;
+        const name = m.role === "user" ? (u.settings?.userName || "用户") : char.realName;
+        return `${name}：${m.content}`;
+      }).filter(Boolean);
+      const historyText = historyArr.join("\n");
+      const hour = new Date(now + (u.settings?.tz || 8) * 3600000 - new Date().getTimezoneOffset()*60000).getHours();
+      const timePeriod = hour < 6 ? '凌晨' : hour < 9 ? '早上' : hour < 12 ? '上午' : hour < 14 ? '中午' : hour < 18 ? '下午' : hour < 22 ? '晚上' : '深夜';
+      const gapText = `${Math.floor((now - lastChat)/60000)}分钟`;
+
+      // 调 AI
+      let text = "";
+      try { text = await callBgAI(u, char, gapText, historyText, timePeriod); } catch (e) { console.warn("bg ai error", e); }
+      const acts = parseBgText(text);
+
+      // 写入暂存 + 推送
+      if (acts.dm && acts.dm.length) {
+        u.newMsgs = u.newMsgs || [];
+        acts.dm.slice(0, 3).forEach(dm => {
+          u.newMsgs.push({ charId: char.id, role: "ai", content: dm, time: Date.now() });
+          pushToUser(String(userId), {
+            title: char.displayName || char.realName || "新消息",
+            body: dm.slice(0, 60),
+            url: "https://huios.pages.dev",
+            tag: "chat-" + char.id,
+            icon: char.avatar || ""
+          });
+        });
+      }
+      if (acts.moment && acts.moment.length) {
+        u.newMoments = u.newMoments || [];
+        const m = acts.moment[0];
+        u.newMoments.push({ charId: char.id, content: m, time: Date.now() });
+        pushToUser(String(userId), {
+            title: (char.displayName || char.realName || "角色") + " 发了新动态",
+            body: m.slice(0, 60),
+            url: "https://huios.pages.dev",
+            tag: "moment-" + char.id,
+            icon: char.avatar || ""
+        });
+      }
+      u.lastBgTime = u.lastBgTime || {};
+      u.lastBgTime[char.id] = now;
+    }
+  }
+  saveBgData();
+}
+setInterval(runBgCron, 60 * 1000);
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log("server running on port", port));
