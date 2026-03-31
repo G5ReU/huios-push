@@ -210,7 +210,11 @@ app.post("/subscribe", (req, res) => {
 
     const uid = String(userId);
 
-    // 更新用户基础档案
+    console.log("[subscribe]", {
+      userId: uid,
+      endpoint: sub.endpoint.slice(0, 100)
+    });
+
     if (!users[uid]) {
       users[uid] = {
         userId: uid,
@@ -227,9 +231,9 @@ app.post("/subscribe", (req, res) => {
       users[uid].ipMasked = maskIp(getRawIp(req));
       users[uid].ipHash = ipHash(getRawIp(req));
     }
+
     saveJson(USERS_FILE, users);
 
-    // 同设备去重
     subscriptions = subscriptions.filter(s => s.endpoint !== sub.endpoint);
     subscriptions.push({ ...sub, userId: uid });
     saveJson(SUBS_FILE, subscriptions);
@@ -257,9 +261,16 @@ app.get("/subscriptions", (req, res) => {
   });
 });
 
-// ===== 统一发推送工具 =====
 async function pushToUser(userId, payloadObj) {
   const targets = subscriptions.filter(s => s.userId === userId);
+
+  console.log("[pushToUser]", {
+    userId,
+    targetCount: targets.length,
+    title: payloadObj?.title || "",
+    tag: payloadObj?.tag || ""
+  });
+
   if (!targets.length) return { sent: 0, total: 0 };
 
   const payload = JSON.stringify(payloadObj);
@@ -275,11 +286,24 @@ async function pushToUser(userId, payloadObj) {
       alive.push(sub);
     } catch (e) {
       const code = e?.statusCode;
+      console.warn("[pushToUser] send failed", {
+        userId,
+        code,
+        endpoint: sub?.endpoint?.slice(0, 80)
+      });
       if (code !== 404 && code !== 410) alive.push(sub);
     }
   }
+
   subscriptions = alive;
   saveJson(SUBS_FILE, subscriptions);
+
+  console.log("[pushToUser] result", {
+    userId,
+    sent: success,
+    total: targets.length
+  });
+
   return { sent: success, total: targets.length };
 }
 
@@ -318,9 +342,19 @@ app.post("/send-push", async (req, res) => {
   }
 });
 
-// 前端同步基础数据
 app.post("/bg/sync", (req, res) => {
   const { userId, chars, chats, settings, api, lastInteract, lastBgTime } = req.body || {};
+
+  console.log("[bg/sync]", {
+    userId,
+    charsCount: Array.isArray(chars) ? chars.length : -1,
+    chatKeys: chats ? Object.keys(chats).length : -1,
+    hasApiKey: !!api?.key,
+    model: api?.model || "",
+    hasLastInteract: !!lastInteract,
+    hasLastBgTime: !!lastBgTime
+  });
+
   if (!userId || !chars || !chats) return fail(res, 400, "bad params");
 
   const old = bgData[userId] || {};
@@ -347,9 +381,24 @@ app.post("/bg/sync", (req, res) => {
 // 前端拉取服务器生成的新内容
 app.get("/bg/pull", (req, res) => {
   const userId = String(req.query.userId || "");
-  if (!userId || !bgData[userId]) return ok(res, { newMsgs: [], newMoments: [] });
+  if (!userId || !bgData[userId]) {
+    console.log("[bg/pull]", { userId, msgCount: 0, momentCount: 0, exists: false });
+    return ok(res, { newMsgs: [], newMoments: [] });
+  }
+
   const u = bgData[userId];
-  ok(res, { newMsgs: u.newMsgs || [], newMoments: u.newMoments || [] });
+  const newMsgs = u.newMsgs || [];
+  const newMoments = u.newMoments || [];
+
+  console.log("[bg/pull]", {
+    userId,
+    msgCount: newMsgs.length,
+    momentCount: newMoments.length,
+    exists: true
+  });
+
+  ok(res, { newMsgs, newMoments });
+
   u.newMsgs = [];
   u.newMoments = [];
   saveBgData();
@@ -589,7 +638,7 @@ function parseBgText(text) {
 }
 
 // 每分钟巡检
-async function runBgCron() {
+async function runBgCronCore() {
   const now = Date.now();
   console.log("[bgCron] tick", new Date(now).toISOString(), "users=", Object.keys(bgData).length);
 
@@ -602,24 +651,24 @@ async function runBgCron() {
         continue;
       }
 
-const lastInteractTime = u.lastInteract?.[char.id];
-const lastChatMsgTime = (u.chats?.[char.id] || []).slice(-1)[0]?.time;
-const lastChat = (typeof lastInteractTime === "number" ? lastInteractTime : 0)
-              || (typeof lastChatMsgTime === "number" ? lastChatMsgTime : 0)
-              || (u.chats?.[char.id]?.length ? Date.now() - 60 * 60 * 1000 : 0);
-const lastBg = (u.lastBgTime && u.lastBgTime[char.id]) || 0;
+      const lastInteractTime = u.lastInteract?.[char.id];
+      const lastChatMsgTime = (u.chats?.[char.id] || []).slice(-1)[0]?.time;
+      const lastChat = (typeof lastInteractTime === "number" ? lastInteractTime : 0)
+                    || (typeof lastChatMsgTime === "number" ? lastChatMsgTime : 0)
+                    || (u.chats?.[char.id]?.length ? Date.now() - 60 * 60 * 1000 : 0);
+      const lastBg = (u.lastBgTime && u.lastBgTime[char.id]) || 0;
 
-console.log("[bgCron] lastChat debug", {
-  userId,
-  charId: char.id,
-  lastInteractTime,
-  lastChatMsgTime,
-  lastChat,
-  lastBg,
-  intervalMs,
-  sinceChat: Date.now() - lastChat,
-  sinceBg: Date.now() - lastBg
-});
+      console.log("[bgCron] lastChat debug", {
+        userId,
+        charId: char.id,
+        lastInteractTime,
+        lastChatMsgTime,
+        lastChat,
+        lastBg,
+        intervalMs,
+        sinceChat: Date.now() - lastChat,
+        sinceBg: Date.now() - lastBg
+      });
 
       console.log("[bgCron] check", {
         userId,
@@ -655,6 +704,7 @@ console.log("[bgCron] lastChat debug", {
       const hour = new Date(
         now + (u.settings?.tz || 8) * 3600000 - new Date().getTimezoneOffset() * 60000
       ).getHours();
+
       const timePeriod =
         hour < 6 ? "凌晨" :
         hour < 9 ? "早上" :
@@ -662,6 +712,7 @@ console.log("[bgCron] lastChat debug", {
         hour < 14 ? "中午" :
         hour < 18 ? "下午" :
         hour < 22 ? "晚上" : "深夜";
+
       const gapText = `${Math.floor((now - lastChat) / 60000)}分钟`;
 
       let text = "";
@@ -673,6 +724,13 @@ console.log("[bgCron] lastChat debug", {
       }
 
       const acts = parseBgText(text);
+
+      console.log("[bgCron] actions parsed", {
+        userId,
+        charId: char.id,
+        dmCount: acts.dm?.length || 0,
+        momentCount: acts.moment?.length || 0
+      });
 
       if (acts.dm && acts.dm.length) {
         u.newMsgs = u.newMsgs || [];
@@ -725,7 +783,24 @@ console.log("[bgCron] lastChat debug", {
 
   saveBgData();
 }
+let bgCronRunning = false;
+
+async function runBgCron() {
+  if (bgCronRunning) {
+    console.log("[bgCron] skip: previous run still active");
+    return;
+  }
+
+  bgCronRunning = true;
+  try {
+    await runBgCronCore();
+  } finally {
+    bgCronRunning = false;
+  }
+}
+
 runBgCron().catch(e => console.warn("bg cron first run error:", e));
+
 setInterval(() => {
   runBgCron().catch(e => console.warn("bg cron error:", e));
 }, 15 * 1000);
