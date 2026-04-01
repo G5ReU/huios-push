@@ -4,6 +4,7 @@ import webpush from "web-push";
 import fs from "fs";
 import crypto from "crypto";
 import path from "path";
+import redis from "./redis.js";
 import { fileURLToPath } from "url";
 
 const app = express();
@@ -807,3 +808,18 @@ setInterval(() => {
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log("server running on port", port));
+app.get("/redis-test", async (req, res) => {
+  try {
+    await redis.set("test:key", {
+      ok: true,
+      time: Date.now()
+    });
+
+    const value = await redis.get("test:key");
+
+    res.json({ ok: true, value });
+  } catch (err) {
+    console.error("[redis-test] error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
