@@ -6,6 +6,8 @@ import crypto from "crypto";
 import path from "path";
 import redis from "./redis.js";
 import { fileURLToPath } from "url";
+import { getAllBgData, getBgUser, setBgUser, setAllBgData } from "./bgStore.js";
+import { acquireBgLock, releaseBgLock } from "./bgLock.js";
 
 const app = express();
 const __filename = fileURLToPath(import.meta.url);
@@ -33,8 +35,6 @@ const AUDIT_FILE = "./audit.json";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "123456";
 // ===== 后台活动存储 =====
 const BG_DATA_FILE = "./bgdata.json";
-let bgData = loadJson(BG_DATA_FILE, {}); // { userId: { chars, chats, settings, api, lastInteract, lastBgTime, newMsgs, newMoments } }
-function saveBgData() { saveJson(BG_DATA_FILE, bgData); }
 
 // ===== 工具 =====
 function loadJson(file, fallback) {
@@ -343,66 +343,69 @@ app.post("/send-push", async (req, res) => {
   }
 });
 
-app.post("/bg/sync", (req, res) => {
-  const { userId, chars, chats, settings, api, lastInteract, lastBgTime } = req.body || {};
+app.post("/bg/sync", async (req, res) => {
+  try {
+    const { userId, chars, chats, settings, api, lastInteract, lastBgTime } = req.body || {};
 
-  console.log("[bg/sync]", {
-    userId,
-    charsCount: Array.isArray(chars) ? chars.length : -1,
-    chatKeys: chats ? Object.keys(chats).length : -1,
-    hasApiKey: !!api?.key,
-    model: api?.model || "",
-    hasLastInteract: !!lastInteract,
-    hasLastBgTime: !!lastBgTime
-  });
+    console.log("[bg/sync]", {
+      userId,
+      charsCount: Array.isArray(chars) ? chars.length : -1,
+      chatKeys: chats ? Object.keys(chats).length : -1
+    });
 
-  if (!userId || !chars || !chats) return fail(res, 400, "bad params");
+    if (!userId || !chars || !chats) {
+      return fail(res, 400, "bad params");
+    }
 
-  const old = bgData[userId] || {};
+    const old = (await getBgUser(userId)) || {};
 
-  bgData[userId] = {
-    ...old,
-    chars,
-    chats,
-    settings: settings || old.settings || {},
-    api: api || old.api || {},
-    lastInteract: lastInteract || old.lastInteract || {},
-    lastBgTime: {
-      ...(old.lastBgTime || {}),
-      ...(lastBgTime || {})
-    },
-    newMsgs: old.newMsgs || [],
-    newMoments: old.newMoments || []
-  };
+    const next = {
+      ...old,
+      chars,
+      chats,
+      settings: settings || old.settings || {},
+      api: api || old.api || {},
+      lastInteract: lastInteract || old.lastInteract || {},
+      lastBgTime: {
+        ...(old.lastBgTime || {}),
+        ...(lastBgTime || {})
+      },
+      newMsgs: old.newMsgs || [],
+      newMoments: old.newMoments || []
+    };
 
-  saveBgData();
-  ok(res);
+    await setBgUser(userId, next);
+
+    console.log("[bg/sync] saved", userId);
+    ok(res);
+  } catch (err) {
+    console.error("[bg/sync] error:", err);
+    fail(res, 500, err.message || "sync failed");
+  }
 });
 
 // 前端拉取服务器生成的新内容
-app.get("/bg/pull", (req, res) => {
-  const userId = String(req.query.userId || "");
-  if (!userId || !bgData[userId]) {
-    console.log("[bg/pull]", { userId, msgCount: 0, momentCount: 0, exists: false });
-    return ok(res, { newMsgs: [], newMoments: [] });
+app.get("/bg/pull", async (req, res) => {
+  try {
+    const userId = String(req.query.userId || "");
+    const u = userId ? await getBgUser(userId) : null;
+
+    if (!userId || !u) {
+      return ok(res, { newMsgs: [], newMoments: [] });
+    }
+
+    const newMsgs = u.newMsgs || [];
+    const newMoments = u.newMoments || [];
+
+    ok(res, { newMsgs, newMoments });
+
+    u.newMsgs = [];
+    u.newMoments = [];
+    await setBgUser(userId, u);
+  } catch (err) {
+    console.error("[bg/pull] error:", err);
+    fail(res, 500, err.message || "pull failed");
   }
-
-  const u = bgData[userId];
-  const newMsgs = u.newMsgs || [];
-  const newMoments = u.newMoments || [];
-
-  console.log("[bg/pull]", {
-    userId,
-    msgCount: newMsgs.length,
-    momentCount: newMoments.length,
-    exists: true
-  });
-
-  ok(res, { newMsgs, newMoments });
-
-  u.newMsgs = [];
-  u.newMoments = [];
-  saveBgData();
 });
 
 // ===== Admin =====
@@ -641,6 +644,7 @@ function parseBgText(text) {
 // 每分钟巡检
 async function runBgCronCore() {
   const now = Date.now();
+  const bgData = await getAllBgData();
   console.log("[bgCron] tick", new Date(now).toISOString(), "users=", Object.keys(bgData).length);
 
   for (const [userId, u] of Object.entries(bgData)) {
@@ -782,24 +786,21 @@ async function runBgCronCore() {
     }
   }
 
-  saveBgData();
+await setAllBgData(bgData);
 }
-let bgCronRunning = false;
-
 async function runBgCron() {
-  if (bgCronRunning) {
+  const locked = await acquireBgLock(120);
+  if (!locked) {
     console.log("[bgCron] skip: previous run still active");
     return;
   }
 
-  bgCronRunning = true;
   try {
     await runBgCronCore();
   } finally {
-    bgCronRunning = false;
+    await releaseBgLock();
   }
 }
-
 runBgCron().catch(e => console.warn("bg cron first run error:", e));
 
 setInterval(() => {
@@ -808,15 +809,11 @@ setInterval(() => {
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log("server running on port", port));
+
 app.get("/redis-test", async (req, res) => {
   try {
-    await redis.set("test:key", {
-      ok: true,
-      time: Date.now()
-    });
-
+    await redis.set("test:key", { ok: true, time: Date.now() });
     const value = await redis.get("test:key");
-
     res.json({ ok: true, value });
   } catch (err) {
     console.error("[redis-test] error:", err);
