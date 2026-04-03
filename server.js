@@ -52,6 +52,12 @@ function saveJson(file, data) {
 function now() {
   return Date.now();
 }
+function isOn(v) {
+  return v === true || v === 1 || v === "1" || v === "true";
+}
+function isOff(v) {
+  return v === false || v === 0 || v === "0" || v === "false";
+}
 function getRawIp(req) {
   const xff = (req.headers["x-forwarded-for"] || "").toString().split(",")[0].trim();
   return xff || req.ip || req.socket?.remoteAddress || "";
@@ -647,11 +653,28 @@ async function runBgCronCore() {
   const bgData = await getAllBgData();
   console.log("[bgCron] tick", new Date(now).toISOString(), "users=", Object.keys(bgData).length);
 
-  for (const [userId, u] of Object.entries(bgData)) {
-    const intervalMs = Math.max((u.settings?.bgInterval || 120) * 1000, 5000);
+for (const [userId, u] of Object.entries(bgData)) {
+  const s = u.settings || {};
+
+  // 全局后台开关：关了就整个用户跳过
+  if (!isOn(s.bgOn)) {
+    console.log("[bgCron] skip user bgOff", { userId });
+    continue;
+  }
+
+  const allowDm = isOn(s.bgDmOn);
+  const allowMoment = isOn(s.bgMomentOn);
+
+  // 私信和动态都关了，就没必要跑
+  if (!allowDm && !allowMoment) {
+    console.log("[bgCron] skip user all actions off", { userId });
+    continue;
+  }
+
+  const intervalMs = Math.max((s.bgInterval || 120) * 1000, 5000);
 
     for (const char of u.chars || []) {
-      if (char.bgEnabled === false) {
+if (isOff(char.bgEnabled)) {
         console.log("[bgCron] skip bg disabled", { userId, charId: char.id });
         continue;
       }
@@ -728,65 +751,66 @@ async function runBgCronCore() {
         console.warn("[bgCron] bg ai error", e);
       }
 
-      const acts = parseBgText(text);
+const acts = parseBgText(text);
+let didAct = false;
 
-      console.log("[bgCron] actions parsed", {
-        userId,
-        charId: char.id,
-        dmCount: acts.dm?.length || 0,
-        momentCount: acts.moment?.length || 0
-      });
+// DM
+if (allowDm && acts.dm && acts.dm.length) {
+  u.newMsgs = u.newMsgs || [];
+  for (const dm of acts.dm.slice(0, 3)) {
+    u.newMsgs.push({
+      charId: char.id,
+      role: "ai",
+      content: dm,
+      time: Date.now()
+    });
 
-      if (acts.dm && acts.dm.length) {
-        u.newMsgs = u.newMsgs || [];
+    const pushRes = await pushToUser(String(userId), {
+      title: char.displayName || char.realName || "新消息",
+      body: dm.slice(0, 60),
+      url: "https://huios.pages.dev",
+      tag: `chat-${char.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      icon: char.avatar || ""
+    });
 
-        for (const dm of acts.dm.slice(0, 3)) {
-          u.newMsgs.push({
-            charId: char.id,
-            role: "ai",
-            content: dm,
-            time: Date.now()
-          });
-
-          const pushRes = await pushToUser(String(userId), {
-            title: char.displayName || char.realName || "新消息",
-            body: dm.slice(0, 60),
-            url: "https://huios.pages.dev",
-            tag: "chat-" + char.id,
-            icon: char.avatar || ""
-          });
-
-          console.log("[bgCron] dm pushed", { userId, charId: char.id, pushRes });
-        }
-      }
-
-      if (acts.moment && acts.moment.length) {
-        u.newMoments = u.newMoments || [];
-        const m = acts.moment[0];
-
-        u.newMoments.push({
-          charId: char.id,
-          content: m,
-          time: Date.now()
-        });
-
-        const pushRes = await pushToUser(String(userId), {
-          title: (char.displayName || char.realName || "角色") + " 发了新动态",
-          body: m.slice(0, 60),
-          url: "https://huios.pages.dev",
-          tag: "moment-" + char.id,
-          icon: char.avatar || ""
-        });
-
-        console.log("[bgCron] moment pushed", { userId, charId: char.id, pushRes });
-      }
-
-      u.lastBgTime = u.lastBgTime || {};
-      u.lastBgTime[char.id] = now;
-    }
+    console.log("[bgCron] dm pushed", { userId, charId: char.id, pushRes });
   }
+  didAct = true;
+}
 
-await setAllBgData(bgData);
+// MOMENT
+if (allowMoment && acts.moment && acts.moment.length) {
+  u.newMoments = u.newMoments || [];
+  const m = acts.moment[0];
+
+  u.newMoments.push({
+    charId: char.id,
+    content: m,
+    time: Date.now()
+  });
+
+  const pushRes = await pushToUser(String(userId), {
+    title: (char.displayName || char.realName || "角色") + " 发了新动态",
+    body: m.slice(0, 60),
+    url: "https://huios.pages.dev",
+    tag: `moment-${char.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    icon: char.avatar || ""
+  });
+
+  console.log("[bgCron] moment pushed", { userId, charId: char.id, pushRes });
+  didAct = true;
+}
+
+// 仅有动作才更新时间
+if (didAct) {
+  u.lastBgTime = u.lastBgTime || {};
+  u.lastBgTime[char.id] = now;
+}
+
+    } // <- end for (const char ...)
+  }   // <- end for (const [userId, u] ...)
+
+  await setAllBgData(bgData);
 }
 async function runBgCron() {
   const locked = await acquireBgLock(120);
@@ -794,13 +818,13 @@ async function runBgCron() {
     console.log("[bgCron] skip: previous run still active");
     return;
   }
-
   try {
     await runBgCronCore();
   } finally {
     await releaseBgLock();
   }
 }
+
 runBgCron().catch(e => console.warn("bg cron first run error:", e));
 
 setInterval(() => {
@@ -809,14 +833,3 @@ setInterval(() => {
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log("server running on port", port));
-
-app.get("/redis-test", async (req, res) => {
-  try {
-    await redis.set("test:key", { ok: true, time: Date.now() });
-    const value = await redis.get("test:key");
-    res.json({ ok: true, value });
-  } catch (err) {
-    console.error("[redis-test] error:", err);
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
