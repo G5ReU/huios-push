@@ -58,6 +58,9 @@ function isOn(v) {
 function isOff(v) {
   return v === false || v === 0 || v === "0" || v === "false";
 }
+function normalizeUserId(uid) {
+  return String(uid || "").replace(/^acc_/, "");
+}
 function getRawIp(req) {
   const xff = (req.headers["x-forwarded-for"] || "").toString().split(",")[0].trim();
   return xff || req.ip || req.socket?.remoteAddress || "";
@@ -215,7 +218,7 @@ app.post("/subscribe", (req, res) => {
     if (!sub || !sub.endpoint) return fail(res, 400, "bad subscription");
     if (!userId) return fail(res, 400, "no userId");
 
-    const uid = String(userId);
+const uid = normalizeUserId(userId);
 
     console.log("[subscribe]", {
       userId: uid,
@@ -254,7 +257,10 @@ app.post("/subscribe", (req, res) => {
 // ===== 调试订阅 =====
 app.get("/subscriptions", (req, res) => {
   const { userId } = req.query;
-  const list = userId ? subscriptions.filter(s => s.userId === userId) : subscriptions;
+  const qid = userId ? normalizeUserId(userId) : "";
+  const list = qid
+    ? subscriptions.filter(s => normalizeUserId(s.userId) === qid)
+    : subscriptions;
 
   ok(res, {
     total: subscriptions.length,
@@ -269,7 +275,8 @@ app.get("/subscriptions", (req, res) => {
 });
 
 async function pushToUser(userId, payloadObj) {
-  const targets = subscriptions.filter(s => s.userId === userId);
+  const uid = normalizeUserId(userId);
+  const targets = subscriptions.filter(s => normalizeUserId(s.userId) === uid);
 
   console.log("[pushToUser]", {
     userId,
@@ -286,10 +293,10 @@ async function pushToUser(userId, payloadObj) {
 
   for (const sub of subscriptions) {
     try {
-      if (sub.userId === userId) {
-        await webpush.sendNotification(sub, payload);
-        success++;
-      }
+if (normalizeUserId(sub.userId) === uid) {
+  await webpush.sendNotification(sub, payload);
+  success++;
+}
       alive.push(sub);
     } catch (e) {
       const code = e?.statusCode;
@@ -319,7 +326,7 @@ app.get("/send-test", async (req, res) => {
   const { userId } = req.query;
   if (!userId) return fail(res, 400, "请带上 ?userId=你的ID");
 
-  const r = await pushToUser(String(userId), {
+const r = await pushToUser(normalizeUserId(userId), {
     title: "测试推送",
     body: "这是一份手动推送，您已成功！",
     url: "https://huios.pages.dev",
@@ -335,7 +342,7 @@ app.post("/send-push", async (req, res) => {
     const { title, body, url, userId, tag, icon } = req.body || {};
     if (!userId) return fail(res, 400, "no userId");
 
-    const r = await pushToUser(String(userId), {
+const r = await pushToUser(normalizeUserId(userId), {
       title: title || "HuiOS",
       body: body || "",
       url: url || "https://huios.pages.dev",
@@ -351,7 +358,8 @@ app.post("/send-push", async (req, res) => {
 
 app.post("/bg/sync", async (req, res) => {
   try {
-    const { userId, chars, chats, settings, api, lastInteract, lastBgTime } = req.body || {};
+const { userId, chars, chats, settings, api, lastInteract, lastBgTime } = req.body || {};
+const uid = normalizeUserId(userId);
 
     console.log("[bg/sync]", {
       userId,
@@ -363,7 +371,7 @@ app.post("/bg/sync", async (req, res) => {
       return fail(res, 400, "bad params");
     }
 
-    const old = (await getBgUser(userId)) || {};
+const old = (await getBgUser(uid)) || {};
 
     const next = {
       ...old,
@@ -380,9 +388,9 @@ app.post("/bg/sync", async (req, res) => {
       newMoments: old.newMoments || []
     };
 
-    await setBgUser(userId, next);
+await setBgUser(uid, next);
 
-    console.log("[bg/sync] saved", userId);
+console.log("[bg/sync] saved", uid);
     ok(res);
   } catch (err) {
     console.error("[bg/sync] error:", err);
@@ -393,7 +401,7 @@ app.post("/bg/sync", async (req, res) => {
 // 前端拉取服务器生成的新内容
 app.get("/bg/pull", async (req, res) => {
   try {
-    const userId = String(req.query.userId || "");
+const userId = normalizeUserId(req.query.userId || "");
     const u = userId ? await getBgUser(userId) : null;
 
     if (!userId || !u) {
