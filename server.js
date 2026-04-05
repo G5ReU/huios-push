@@ -682,8 +682,8 @@ for (const [userId, u] of Object.entries(bgData)) {
   const intervalMs = Math.max((s.bgInterval || 120) * 1000, 5000);
 
     for (const char of u.chars || []) {
-if (isOff(char.bgEnabled)) {
-        console.log("[bgCron] skip bg disabled", { userId, charId: char.id });
+if (char.bgEnabled !== true) {
+        console.log("[bgCron] skip bg not-enabled", { userId, charId: char.id, bgEnabled: char.bgEnabled });
         continue;
       }
 
