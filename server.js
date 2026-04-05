@@ -841,3 +841,38 @@ setInterval(() => {
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log("server running on port", port));
+app.post("/send-push-delay", async (req, res) => {
+  try {
+    const { userId, title, body, url, tag, icon, delayMs } = req.body || {};
+    if (!userId) return fail(res, 400, "no userId");
+
+    const ms = Math.max(0, Math.min(Number(delayMs || 0), 10 * 60 * 1000));
+    const uid = normalizeUserId(userId);
+
+    const targetCount = subscriptions.filter(s => normalizeUserId(s.userId) === uid).length;
+    console.log("[send-push-delay] queued", { uid, ms, targetCount, tag });
+
+    if (targetCount < 1) {
+      return ok(res, { queued: false, reason: "no subscription", userId: uid, delayMs: ms, targetCount });
+    }
+
+    setTimeout(async () => {
+      try {
+        const r = await pushToUser(uid, {
+          title: title || "HuiOS",
+          body: body || "",
+          url: url || "https://huios.pages.dev",
+          tag: tag || ("delay-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8)),
+          icon: icon || ""
+        });
+        console.log("[send-push-delay] fired", { uid, ms, ...r });
+      } catch (e) {
+        console.warn("[send-push-delay] fire failed", e);
+      }
+    }, ms);
+
+    return ok(res, { queued: true, userId: uid, delayMs: ms, targetCount });
+  } catch (e) {
+    return fail(res, 500, String(e));
+  }
+});
