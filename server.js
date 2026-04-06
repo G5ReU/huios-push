@@ -358,8 +358,8 @@ const r = await pushToUser(normalizeUserId(userId), {
 
 app.post("/bg/sync", async (req, res) => {
   try {
-const { userId, chars, chats, settings, api, lastInteract, lastBgTime } = req.body || {};
-const uid = normalizeUserId(userId);
+    const { userId, chars, chats, settings, api, lastInteract, lastBgTime } = req.body || {};
+    const uid = normalizeUserId(userId);
 
     console.log("[bg/sync]", {
       userId,
@@ -371,13 +371,15 @@ const uid = normalizeUserId(userId);
       return fail(res, 400, "bad params");
     }
 
-const old = (await getBgUser(uid)) || {};
+    const old = (await getBgUser(uid)) || {};
+    const prevS = old.settings || {};
+    const nextS = settings || old.settings || {};
 
     const next = {
       ...old,
       chars,
       chats,
-      settings: settings || old.settings || {},
+      settings: nextS,
       api: api || old.api || {},
       lastInteract: lastInteract || old.lastInteract || {},
       lastBgTime: {
@@ -388,9 +390,21 @@ const old = (await getBgUser(uid)) || {};
       newMoments: old.newMoments || []
     };
 
-await setBgUser(uid, next);
+    // 后台刚开启 / 间隔改动：从“现在”开始重新计时，避免立刻触发
+    const bgTurnedOn = !isOn(prevS.bgOn) && isOn(nextS.bgOn);
+    const intervalChanged = Number(prevS.bgInterval || 120) !== Number(nextS.bgInterval || 120);
 
-console.log("[bg/sync] saved", uid);
+    if (bgTurnedOn || intervalChanged) {
+      const nowTs = Date.now();
+      next.lastBgTime = next.lastBgTime || {};
+      (chars || []).forEach(c => {
+        if (c && c.id && c.bgEnabled === true) next.lastBgTime[c.id] = nowTs;
+      });
+    }
+
+    await setBgUser(uid, next);
+
+    console.log("[bg/sync] saved", uid);
     ok(res);
   } catch (err) {
     console.error("[bg/sync] error:", err);
@@ -670,14 +684,8 @@ for (const [userId, u] of Object.entries(bgData)) {
     continue;
   }
 
-  const allowDm = isOn(s.bgDmOn);
-  const allowMoment = isOn(s.bgMomentOn);
-
-  // 私信和动态都关了，就没必要跑
-  if (!allowDm && !allowMoment) {
-    console.log("[bgCron] skip user all actions off", { userId });
-    continue;
-  }
+const allowDm = true;
+const allowMoment = true;
 
   const intervalMs = Math.max((s.bgInterval || 120) * 1000, 5000);
 
