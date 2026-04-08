@@ -10,6 +10,13 @@ import { getAllBgData, getBgUser, setBgUser, setAllBgData } from "./bgStore.js";
 import { acquireBgLock, releaseBgLock } from "./bgLock.js";
 
 const app = express();
+process.on("unhandledRejection", (reason) => {
+  console.error("[FATAL] unhandledRejection:", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("[FATAL] uncaughtException:", err);
+});
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
