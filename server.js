@@ -10,6 +10,7 @@ import { getAllBgData, getBgUser, setBgUser, setAllBgData } from "./bgStore.js";
 import { acquireBgLock, releaseBgLock } from "./bgLock.js";
 
 const app = express();
+const SAFE_MODE = process.env.SAFE_MODE === "1";
 process.on("unhandledRejection", (reason) => {
   console.error("[FATAL] unhandledRejection:", reason);
 });
@@ -54,7 +55,13 @@ function loadJson(file, fallback) {
   }
 }
 function saveJson(file, data) {
-  fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8");
+  try {
+    fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8");
+    return true;
+  } catch (e) {
+    console.error("[saveJson] failed:", file, e?.message || e);
+    return false;
+  }
 }
 function now() {
   return Date.now();
@@ -824,11 +831,9 @@ if (allowMoment && acts.moment && acts.moment.length) {
   didAct = true;
 }
 
-// 仅有动作才更新时间
-if (didAct) {
-  u.lastBgTime = u.lastBgTime || {};
-  u.lastBgTime[char.id] = now;
-}
+// 不管有没有动作，都更新时间，保证按间隔来
+u.lastBgTime = u.lastBgTime || {};
+u.lastBgTime[char.id] = now;
 
     } // <- end for (const char ...)
   }   // <- end for (const [userId, u] ...)
@@ -848,13 +853,19 @@ async function runBgCron() {
   }
 }
 
-runBgCron().catch(e => console.warn("bg cron first run error:", e));
-
-setInterval(() => {
-  runBgCron().catch(e => console.warn("bg cron error:", e));
-}, 15 * 1000);
+if (!SAFE_MODE) {
+  runBgCron().catch(e => console.warn("bg cron first run error:", e));
+  setInterval(() => {
+    runBgCron().catch(e => console.warn("bg cron error:", e));
+  }, 15 * 1000);
+} else {
+  console.log("[SAFE_MODE] bg cron disabled");
+}
 
 const port = process.env.PORT || 3000;
+app.get("/healthz", (req, res) => {
+  res.json({ ok: true, safeMode: SAFE_MODE, uptime: process.uptime() });
+});
 app.listen(port, () => console.log("server running on port", port));
 app.post("/send-push-delay", async (req, res) => {
   try {
