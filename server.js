@@ -960,7 +960,10 @@ u.lastBgTime[char.id] = now;
     } // <- end for (const char ...)
   }   // <- end for (const [userId, u] ...)
 
-  await setAllBgData(bgData);
+  for (const [uid, uData] of Object.entries(bgData)) {
+    await setBgUser(uid, uData);
+  }
+}
 }
 async function runBgCron() {
   const locked = await acquireBgLock(120);
