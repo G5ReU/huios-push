@@ -965,14 +965,42 @@ u.lastBgTime[char.id] = now;
   }
 }
 
+let __bgCronLastRun = 0;
+let __bgCronLastResult = "";
+
+app.get("/bg/unlock", async (req, res) => {
+  try {
+    await releaseBgLock();
+    ok(res, { unlocked: true });
+  } catch (e) {
+    fail(res, 500, e.message);
+  }
+});
+
+app.get("/bg/cron-status", (req, res) => {
+  ok(res, {
+    lastRun: __bgCronLastRun,
+    lastRunIso: __bgCronLastRun ? new Date(__bgCronLastRun).toISOString() : "",
+    secAgo: __bgCronLastRun ? Math.floor((Date.now() - __bgCronLastRun) / 1000) : -1,
+    lastResult: __bgCronLastResult,
+    safeMode: SAFE_MODE
+  });
+});
+
 async function runBgCron() {
   const locked = await acquireBgLock(120);
   if (!locked) {
-    console.log("[bgCron] skip: previous run still active");
+    console.log("[bgCron] skip: lock held");
+    __bgCronLastResult = "skip:locked";
     return;
   }
   try {
     await runBgCronCore();
+    __bgCronLastRun = Date.now();
+    __bgCronLastResult = "ok";
+  } catch (e) {
+    __bgCronLastResult = "error:" + (e.message || e);
+    console.warn("[bgCron] error:", e);
   } finally {
     await releaseBgLock();
   }
