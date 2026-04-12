@@ -372,7 +372,7 @@ const r = await pushToUser(normalizeUserId(userId), {
 
 app.post("/bg/sync", async (req, res) => {
   try {
-    const { userId, chars, chats, settings, api, lastInteract, lastBgTime } = req.body || {};
+    const { userId, chars, chats, settings, api, lastInteract } = req.body || {};
     const uid = normalizeUserId(userId);
 
     console.log("[bg/sync]", {
@@ -396,10 +396,7 @@ app.post("/bg/sync", async (req, res) => {
       settings: nextS,
       api: api || old.api || {},
       lastInteract: lastInteract || old.lastInteract || {},
-      lastBgTime: {
-        ...(old.lastBgTime || {}),
-        ...(lastBgTime || {})
-      },
+      lastBgTime: old.lastBgTime || {},
       newMsgs: old.newMsgs || [],
       newMoments: old.newMoments || []
     };
