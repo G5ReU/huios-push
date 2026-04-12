@@ -413,6 +413,15 @@ app.post("/bg/sync", async (req, res) => {
       });
     }
 
+        // 保存前重新读取服务端维护的字段，防止覆盖 cron 的更新
+    const freshBeforeSave = await getBgUser(uid);
+    if (freshBeforeSave && !bgTurnedOn && !intervalChanged) {
+      next.lastBgTime = freshBeforeSave.lastBgTime || {};
+    }
+    if (freshBeforeSave) {
+      next.newMsgs = freshBeforeSave.newMsgs || [];
+      next.newMoments = freshBeforeSave.newMoments || [];
+    }
     await setBgUser(uid, next);
 
     console.log("[bg/sync] saved", uid);
