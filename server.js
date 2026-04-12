@@ -450,6 +450,38 @@ const userId = normalizeUserId(req.query.userId || "");
   }
 });
 
+app.get("/bg/debug-status", async (req, res) => {
+  try {
+    const userId = normalizeUserId(req.query.userId || "");
+    const charId = String(req.query.charId || "");
+
+    if (!userId) return fail(res, 400, "no userId");
+
+    const u = await getBgUser(userId);
+    if (!u) {
+      return ok(res, {
+        exists: false,
+        userId,
+        chars: []
+      });
+    }
+
+    const debug = buildBgDebugStatus(userId, u);
+
+    if (charId) {
+      debug.chars = debug.chars.filter(c => c.charId === charId);
+    }
+
+    return ok(res, {
+      exists: true,
+      ...debug
+    });
+  } catch (err) {
+    console.error("[bg/debug-status] error:", err);
+    return fail(res, 500, err.message || "debug failed");
+  }
+});
+
 // ===== Admin =====
 app.post("/admin/login", (req, res) => {
   if (!adminAuth(req)) return fail(res, 401, "密码错误");
@@ -619,6 +651,96 @@ app.post("/admin/appeals/handle", (req, res) => {
 
   ok(res, { appealId: a.id, status: a.status });
 });
+
+function buildBgDebugStatus(userId, u) {
+  const nowTs = Date.now();
+  const s = u?.settings || {};
+
+  const rawIntervalSec = Number(s.bgInterval || 120);
+  const intervalSec = Math.max(Number.isFinite(rawIntervalSec) ? rawIntervalSec : 120, 5);
+  const intervalMs = intervalSec * 1000;
+
+  const chars = (u?.chars || []).map(char => {
+    const chatList = u?.chats?.[char.id] || [];
+    const lastMsg = chatList.length ? chatList[chatList.length - 1] : null;
+
+    const lastInteractTime =
+      typeof u?.lastInteract?.[char.id] === "number" ? u.lastInteract[char.id] : 0;
+
+    const lastChatMsgTime =
+      typeof lastMsg?.time === "number" ? lastMsg.time : 0;
+
+    const lastChat =
+      lastInteractTime ||
+      lastChatMsgTime ||
+      (chatList.length ? nowTs - 60 * 60 * 1000 : 0);
+
+    const lastBg =
+      typeof u?.lastBgTime?.[char.id] === "number" ? u.lastBgTime[char.id] : 0;
+
+    let waitByLastChatMs = null;
+    let waitByLastBgMs = null;
+    let remainingMs = null;
+    let nextAttemptAt = 0;
+    let ready = false;
+    let reason = "";
+
+    if (!isOn(s.bgOn)) {
+      reason = "user bgOff";
+    } else if (char.bgEnabled !== true) {
+      reason = "char bgDisabled";
+    } else if (!lastChat) {
+      reason = "no lastChat";
+    } else {
+      waitByLastChatMs = Math.max(0, intervalMs - (nowTs - lastChat));
+      waitByLastBgMs = Math.max(0, intervalMs - (nowTs - lastBg));
+
+      // 你的当前逻辑是：lastChat 和 lastBg 都要达到间隔
+      remainingMs = Math.max(waitByLastChatMs, waitByLastBgMs);
+      nextAttemptAt = nowTs + remainingMs;
+      ready = remainingMs <= 0;
+
+      reason = ready
+        ? "ready"
+        : (waitByLastChatMs >= waitByLastBgMs ? "waiting lastChat" : "waiting lastBg");
+    }
+
+    return {
+      charId: char.id,
+      name: char.displayName || char.realName || "",
+      bgEnabled: char.bgEnabled === true,
+
+      lastInteractTime,
+      lastChatMsgTime,
+      lastChat,
+      lastBg,
+
+      intervalSec,
+      intervalMs,
+
+      waitByLastChatMs,
+      waitByLastBgMs,
+      remainingMs,
+      remainingSec: remainingMs == null ? null : Math.ceil(remainingMs / 1000),
+
+      nextAttemptAt,
+      nextAttemptAtIso: nextAttemptAt ? new Date(nextAttemptAt).toISOString() : "",
+
+      ready,
+      reason
+    };
+  });
+
+  return {
+    userId,
+    now: nowTs,
+    nowIso: new Date(nowTs).toISOString(),
+    bgOn: isOn(s.bgOn),
+    intervalSec,
+    intervalMs,
+    chars
+  };
+}
 
 // ===== 后台活动生成 =====
 async function callBgAI(u, char, lastGapText, historyText, timePeriod) {
