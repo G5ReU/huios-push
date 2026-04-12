@@ -964,7 +964,7 @@ u.lastBgTime[char.id] = now;
     await setBgUser(uid, uData);
   }
 }
-}
+
 async function runBgCron() {
   const locked = await acquireBgLock(120);
   if (!locked) {
