@@ -10,6 +10,11 @@ import { getAllBgData, getBgUser, setBgUser, setAllBgData } from "./bgStore.js";
 import { acquireBgLock, releaseBgLock } from "./bgLock.js";
 
 const app = express();
+
+const INSTANCE =
+  process.env.RENDER_SERVICE_NAME ||
+  process.env.RENDER_INSTANCE_ID ||
+  ("pid-" + process.pid);
 const SAFE_MODE = process.env.SAFE_MODE === "1";
 process.on("unhandledRejection", (reason) => {
   console.error("[FATAL] unhandledRejection:", reason);
@@ -429,7 +434,7 @@ app.post("/bg/sync", async (req, res) => {
 
     await setBgUser(uid, next);
 
-    console.log("[bg/sync] saved", uid);
+console.log("[bg/sync] saved", { instance: INSTANCE, userId: uid });
     ok(res);
   } catch (err) {
     console.error("[bg/sync] error:", err);
@@ -826,7 +831,11 @@ function parseBgText(text) {
 async function runBgCronCore() {
   const now = Date.now();
   const bgData = await getAllBgData();
-  console.log("[bgCron] tick", new Date(now).toISOString(), "users=", Object.keys(bgData).length);
+console.log("[bgCron] tick", {
+  instance: INSTANCE,
+  at: new Date(now).toISOString(),
+  users: Object.keys(bgData).length
+});
 
 for (const [userId, u] of Object.entries(bgData)) {
   const s = u.settings || {};
@@ -1019,7 +1028,7 @@ app.get("/bg/cron-status", (req, res) => {
 async function runBgCron() {
   const locked = await acquireBgLock(120);
   if (!locked) {
-    console.log("[bgCron] skip: lock held");
+console.log("[bgCron] skip: lock held", { instance: INSTANCE });
     __bgCronLastResult = "skip:locked";
     return;
   }
@@ -1048,7 +1057,7 @@ const port = process.env.PORT || 3000;
 app.get("/healthz", (req, res) => {
   res.json({ ok: true, safeMode: SAFE_MODE, uptime: process.uptime() });
 });
-app.listen(port, () => console.log("server running on port", port));
+app.listen(port, () => console.log("[boot]", { instance: INSTANCE, port, at: new Date().toISOString() }));
 app.post("/send-push-delay", async (req, res) => {
   try {
     const { userId, title, body, url, tag, icon, delayMs } = req.body || {};
