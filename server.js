@@ -717,9 +717,13 @@ function buildBgDebugStatus(userId, u) {
       bgEnabled: char.bgEnabled === true,
 
       lastInteractTime,
+      lastInteractTimeCn: fmtCN(lastInteractTime),
       lastChatMsgTime,
+      lastChatMsgTimeCn: fmtCN(lastChatMsgTime),
       lastChat,
+      lastChatCn: fmtCN(lastChat),
       lastBg,
+      lastBgCn: fmtCN(lastBg),
 
       intervalSec,
       intervalMs,
@@ -731,6 +735,7 @@ function buildBgDebugStatus(userId, u) {
 
       nextAttemptAt,
       nextAttemptAtIso: nextAttemptAt ? new Date(nextAttemptAt).toISOString() : "",
+      nextAttemptAtCn: fmtCN(nextAttemptAt),
 
       ready,
       reason
@@ -741,6 +746,7 @@ function buildBgDebugStatus(userId, u) {
     userId,
     now: nowTs,
     nowIso: new Date(nowTs).toISOString(),
+    nowCn: fmtCN(nowTs),
     bgOn: isOn(s.bgOn),
     intervalSec,
     intervalMs,
@@ -987,6 +993,7 @@ app.get("/bg/cron-status", (req, res) => {
   ok(res, {
     lastRun: __bgCronLastRun,
     lastRunIso: __bgCronLastRun ? new Date(__bgCronLastRun).toISOString() : "",
+    lastRunCn: __bgCronLastRun ? fmtCN(__bgCronLastRun) : "",
     secAgo: __bgCronLastRun ? Math.floor((Date.now() - __bgCronLastRun) / 1000) : -1,
     lastResult: __bgCronLastResult,
     safeMode: SAFE_MODE
@@ -1061,3 +1068,10 @@ app.post("/send-push-delay", async (req, res) => {
     return fail(res, 500, String(e));
   }
 });
+function fmtCN(ts) {
+  if (!ts) return "";
+  return new Date(ts).toLocaleString("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    hour12: false
+  });
+}
