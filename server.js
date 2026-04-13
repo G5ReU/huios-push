@@ -375,6 +375,12 @@ app.post("/bg/sync", async (req, res) => {
     const { userId, chars, chats, settings, api, lastInteract } = req.body || {};
     const uid = normalizeUserId(userId);
 
+    console.log("[bg/sync] settings.bgInterval", {
+      userId: uid,
+      value: settings?.bgInterval,
+      type: typeof settings?.bgInterval
+    });
+
     console.log("[bg/sync]", {
       userId,
       charsCount: Array.isArray(chars) ? chars.length : -1,
@@ -401,7 +407,6 @@ app.post("/bg/sync", async (req, res) => {
       newMoments: old.newMoments || []
     };
 
-    // 后台刚开启 / 间隔改动：从“现在”开始重新计时，避免立刻触发
     const bgTurnedOn = !isOn(prevS.bgOn) && isOn(nextS.bgOn);
     const intervalChanged = Number(prevS.bgInterval || 120) !== Number(nextS.bgInterval || 120);
 
@@ -413,7 +418,6 @@ app.post("/bg/sync", async (req, res) => {
       });
     }
 
-        // 保存前重新读取服务端维护的字段，防止覆盖 cron 的更新
     const freshBeforeSave = await getBgUser(uid);
     if (freshBeforeSave && !bgTurnedOn && !intervalChanged) {
       next.lastBgTime = freshBeforeSave.lastBgTime || {};
@@ -422,6 +426,7 @@ app.post("/bg/sync", async (req, res) => {
       next.newMsgs = freshBeforeSave.newMsgs || [];
       next.newMoments = freshBeforeSave.newMoments || [];
     }
+
     await setBgUser(uid, next);
 
     console.log("[bg/sync] saved", uid);
@@ -835,7 +840,18 @@ for (const [userId, u] of Object.entries(bgData)) {
 const allowDm = true;
 const allowMoment = true;
 
-  const intervalMs = Math.max((s.bgInterval || 120) * 1000, 5000);
+const rawInterval = s.bgInterval;
+const parsedIntervalSec = Number(rawInterval);
+const intervalSec = Number.isFinite(parsedIntervalSec) ? parsedIntervalSec : 120;
+const intervalMs = Math.max(intervalSec * 1000, 5000);
+
+console.log("[bgCron] interval parse", {
+  userId,
+  rawInterval,
+  type: typeof rawInterval,
+  parsedIntervalSec,
+  intervalMs
+});
 
     for (const char of u.chars || []) {
 if (char.bgEnabled !== true) {
